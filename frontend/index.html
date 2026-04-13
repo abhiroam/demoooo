@@ -412,13 +412,22 @@ const screens = {
       <aside class="col-span-12 lg:col-span-4 space-y-6">
         <div class="bg-surface-container-low rounded-2xl p-6">
           <h3 class="font-headline font-bold text-lg mb-4">Frequency Bands</h3>
-          <div class="space-y-3">
-            ${[['DELTA','85','bg-primary'],['THETA','32','bg-secondary'],['ALPHA','18','bg-tertiary'],['BETA','22','bg-primary/60'],['GAMMA','12','bg-tertiary/60']].map(([n,v,c])=>`
-            <div class="flex items-center gap-3">
-              <div class="w-12 text-[10px] font-bold text-outline">${n}</div>
-              <div class="flex-1 bg-surface-container-high h-2 rounded-full"><div class="${c} h-full rounded-full" style="width:${v}%"></div></div>
-              <div class="w-8 text-[10px] text-on-surface-variant">${v}%</div>
-            </div>`).join('')}
+          <div class="space-y-3" id="eeg-band-bars">
+            ${(()=>{
+              const colors={delta:'bg-primary',theta:'bg-secondary',alpha:'bg-tertiary',beta:'bg-primary/60',gamma:'bg-tertiary/60'};
+              const bands = lastResult?.band_contributions || null;
+              return ['delta','theta','alpha','beta','gamma'].map(name=>{
+                const val = bands ? (bands[name]*100).toFixed(1) : '--';
+                const pct = bands ? (bands[name]*100).toFixed(1) : '0';
+                return `<div class="flex items-center gap-3">
+                  <div class="w-12 text-[10px] font-bold text-outline uppercase">${name}</div>
+                  <div class="flex-1 bg-surface-container-high h-2 rounded-full overflow-hidden">
+                    <div class="${colors[name]} h-full rounded-full transition-all duration-700" id="eeg-band-${name}" style="width:${pct}%"></div>
+                  </div>
+                  <div class="w-10 text-[10px] text-on-surface-variant font-mono text-right" id="eeg-band-${name}-txt">${val}${bands?'%':''}</div>
+                </div>`;
+              }).join('');
+            })()}
           </div>
         </div>
         <div class="bg-surface-container-low rounded-2xl p-6 border-l-4 border-primary">
@@ -816,6 +825,17 @@ window.showEEGResult = function(data){
   if (content && panel) {
     content.innerHTML='<p class="text-xs"><span class="text-outline">Prediction:</span> <span class="font-bold text-on-surface">'+data.prediction_label+'</span></p><p class="text-xs mt-1"><span class="text-outline">Mean Risk:</span> <span class="font-bold">'+(data.mean_risk*100).toFixed(1)+'%</span></p><p class="text-xs mt-1"><span class="text-outline">Samples:</span> '+data.n_samples+'</p>';
     panel.classList.remove('hidden');
+  }
+  // ── Animate sidebar frequency band bars with real input data ──
+  if (data.band_contributions) {
+    const bands = data.band_contributions;
+    ['delta','theta','alpha','beta','gamma'].forEach(name => {
+      const bar = document.getElementById(`eeg-band-${name}`);
+      const txt = document.getElementById(`eeg-band-${name}-txt`);
+      const pct = (bands[name] * 100).toFixed(1);
+      if (bar) bar.style.width = pct + '%';
+      if (txt) txt.textContent = pct + '%';
+    });
   }
   if (data.input_signals && data.input_signals.length > 0) {
     const container = document.getElementById('live-eeg-preview-container');

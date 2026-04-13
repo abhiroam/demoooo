@@ -11,7 +11,6 @@ from person23_graph_encoder import UnifiedGraphEncoder
 from person4_transformer import TransformerSSL
 from Person5 import SeizureClassifier
 from analysis import run_analysis
-from person1 import create_epochs, build_sequences
 import tempfile
 import mne
 from pydantic import BaseModel
@@ -150,12 +149,21 @@ def _run_pipeline(nodes, adj, labels=None):
     except Exception:
         pass
         
-    band_weights_arr = clinical.get("band_weights")
-    if band_weights_arr and len(band_weights_arr) == 5:
-        bw = np.array(band_weights_arr)
-        bw = bw / bw.sum()
-        bands = {"delta": float(bw[0]), "theta": float(bw[1]), "alpha": float(bw[2]), "beta": float(bw[3]), "gamma": float(bw[4])}
-    else:
+    # ── Compute REAL band contributions from input signal features ──
+    # nodes: [S, T, 16, 25] — features 0-4 are delta/theta/alpha/beta/gamma PSD per channel
+    try:
+        # Average band PSD across all sequences, windows and channels → [5]
+        band_power = nodes[..., :5].mean(dim=(0, 1, 2)).cpu().numpy()   # [5]
+        band_power = np.abs(band_power)                                  # ensure positive
+        band_power = band_power / (band_power.sum() + 1e-8)             # normalise to sum=1
+        bands = {
+            "delta": float(band_power[0]),
+            "theta": float(band_power[1]),
+            "alpha": float(band_power[2]),
+            "beta":  float(band_power[3]),
+            "gamma": float(band_power[4])
+        }
+    except Exception:
         bands = {"delta": 0.4, "theta": 0.3, "alpha": 0.1, "beta": 0.1, "gamma": 0.1}
 
     # Extract input graph for Live EEG visualization.
@@ -249,22 +257,100 @@ async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".edf")
         with os.fdopen(tmp_fd, "wb") as f:
             f.write(await edf_file.read())
-            
+
         raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
-        # Empty seizures list so it assumes labels = 0 (stable)
-        epochs, labels = create_epochs(raw, [])
-        seq_data, err = build_sequences(epochs, labels)
-        
-        if seq_data is None:
-            raise HTTPException(status_code=400, detail=f"Failed to extract graphs: {err}")
-            
-        nodes_np, adj_np, seq_labels = seq_data
-        
-        nodes_t = torch.tensor(nodes_np, dtype=torch.float32).to(DEVICE)
-        adj_t = torch.tensor(adj_np, dtype=torch.float32).to(DEVICE)
-        labels_t = torch.tensor(seq_labels, dtype=torch.long).to(DEVICE)
-        
-        return _run_pipeline(nodes_t, adj_t, labels_t)
+
+        # ── Fast inline feature extraction (no antropy, no multiprocessing) ──
+        SFREQ      = raw.info["sfreq"]
+        WIN_SEC    = 4.0
+        OVERLAP    = 0.25
+        SEQ_LEN    = 10
+        NUM_CH     = 16
+        MAX_SEQS   = 24   # Stay within Render's 30s timeout
+        BANDS = [(0.5,4),(4,8),(8,13),(13,30),(30,40)]  # delta,theta,alpha,beta,gamma
+
+        data = raw.get_data()
+        # Truncate to first NUM_CH channels if more exist, pad zeros if fewer
+        if data.shape[0] >= NUM_CH:
+            data = data[:NUM_CH, :]
+        else:
+            pad = np.zeros((NUM_CH - data.shape[0], data.shape[1]), dtype=np.float32)
+            data = np.vstack([data, pad])
+
+        win   = int(WIN_SEC * SFREQ)
+        step  = int(win * (1 - OVERLAP))
+        n_pts = data.shape[1]
+        from scipy.signal import welch as _welch
+        from scipy.stats import kurtosis as _kurtosis
+
+        def _epoch_features(seg):
+            """[NUM_CH, WIN] -> [NUM_CH, 9]  (5 band-PSDs + std + kurtosis + hjorth_mob + hjorth_comp)"""
+            freqs, psd = _welch(seg, SFREQ, nperseg=min(512, win))
+            band_feats = []
+            for (lo, hi) in BANDS:
+                idx = (freqs >= lo) & (freqs <= hi)
+                band_feats.append(psd[:, idx].mean(axis=1) if idx.any() else np.zeros(NUM_CH))
+            band_feats = np.array(band_feats).T  # [16, 5]
+
+            std_feat  = seg.std(axis=1, keepdims=True)                  # [16,1]
+            kurt_feat = np.array([_kurtosis(seg[c]) for c in range(NUM_CH)]).reshape(-1,1)  # [16,1]
+
+            # Hjorth parameters (fast, O(n))
+            d1 = np.diff(seg, axis=1)
+            d2 = np.diff(d1, axis=1)
+            mob  = (d1.std(axis=1) / (seg.std(axis=1) + 1e-8)).reshape(-1,1)   # [16,1]
+            comp = (d2.std(axis=1) / (d1.std(axis=1) + 1e-8)).reshape(-1,1)    # [16,1]
+
+            feats = np.concatenate([band_feats, std_feat, kurt_feat, mob, comp], axis=1)  # [16,9]
+            feats = (feats - feats.mean(0)) / (feats.std(0) + 1e-6)
+
+            # Channel identity one-hot [16,16]
+            identity = np.eye(NUM_CH, dtype=np.float32)
+
+            return np.concatenate([feats, identity], axis=1).astype(np.float32)  # [16,25]
+
+        def _epoch_adj(seg):
+            """Compute per-band correlation adjacency -> [5, 16, 16]"""
+            adj_bands = []
+            from scipy.signal import butter, filtfilt
+            for (lo, hi) in BANDS:
+                nyq = SFREQ / 2
+                lo_n, hi_n = lo / nyq, min(hi / nyq, 0.99)
+                try:
+                    b, a = butter(4, [lo_n, hi_n], btype='band')
+                    filtered = filtfilt(b, a, seg, axis=1)
+                except Exception:
+                    filtered = seg
+                # Pearson correlation as adjacency
+                c = np.corrcoef(filtered)
+                c = np.nan_to_num(c, nan=0.0)
+                np.fill_diagonal(c, 1.0)
+                adj_bands.append(c.astype(np.float32))
+            return np.stack(adj_bands, axis=0)  # [5, 16, 16]
+
+        # Extract per-epoch features sequentially
+        epoch_nodes, epoch_adjs = [], []
+        for start in range(0, n_pts - win + 1, step):
+            seg = data[:, start:start+win]
+            epoch_nodes.append(_epoch_features(seg))  # [16, 25]
+            epoch_adjs.append(_epoch_adj(seg))         # [5, 16, 16]
+            if len(epoch_nodes) >= SEQ_LEN * MAX_SEQS:
+                break  # Don't over-process
+
+        if len(epoch_nodes) < SEQ_LEN:
+            raise HTTPException(status_code=400, detail=f"EDF file too short. Need at least {SEQ_LEN} epochs of {WIN_SEC}s, got {len(epoch_nodes)}.")
+
+        # Group into sequences
+        n_seqs = min(len(epoch_nodes) - SEQ_LEN + 1, MAX_SEQS)
+        nodes_seqs = np.stack([epoch_nodes[i:i+SEQ_LEN] for i in range(n_seqs)])     # [S, 10, 16, 25]
+        adj_seqs   = np.stack([epoch_adjs[i:i+SEQ_LEN]  for i in range(n_seqs)])     # [S, 10, 5, 16, 16]
+
+        nodes_t  = torch.tensor(nodes_seqs, dtype=torch.float32).to(DEVICE)
+        adj_t    = torch.tensor(adj_seqs,   dtype=torch.float32).to(DEVICE)
+
+        return _run_pipeline(nodes_t, adj_t)
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -275,6 +361,7 @@ async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
                 os.remove(tmp_path)
             except:
                 pass
+
 
 @app.post("/api/feedback")
 def submit_feedback(req: FeedbackRequest):
