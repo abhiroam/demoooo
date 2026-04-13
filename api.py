@@ -14,6 +14,12 @@ from analysis import run_analysis
 from person1 import create_epochs, build_sequences
 import tempfile
 import mne
+from pydantic import BaseModel
+
+class FeedbackRequest(BaseModel):
+    correct_label: int  # 0: Stable, 1: Pre-ictal, 2: Seizure
+
+LATEST_INFERENCE_CACHE = {}
 
 app = FastAPI(title="CausalTraj-EEG API")
 
@@ -37,6 +43,13 @@ p5  = SeizureClassifier().to(DEVICE)
 p23.eval()
 p4.eval()
 p5.eval()
+
+# HITL Online Optimizer
+ONLINE_OPTIMIZER = torch.optim.AdamW(
+    list(p23.parameters()) + list(p4.parameters()) + list(p5.parameters()), 
+    lr=5e-6, weight_decay=1e-4
+)
+CRITERION = torch.nn.CrossEntropyLoss()
 
 # We serve the frontend dir at the root
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
@@ -85,6 +98,11 @@ def get_training_history():
 def _run_pipeline(nodes, adj, labels=None):
     # Dummy channel mask
     ch_mask = torch.ones(16, dtype=torch.float32).to(DEVICE)
+    
+    # Cache for HITL feedback
+    LATEST_INFERENCE_CACHE["nodes"] = nodes.detach().clone()
+    LATEST_INFERENCE_CACHE["adj"] = adj.detach().clone()
+    LATEST_INFERENCE_CACHE["ch_mask"] = ch_mask.detach().clone()
 
     with torch.no_grad():
         out_p23, spatial_nodes, band_weights = p23(nodes, adj, ch_mask)
@@ -251,6 +269,45 @@ async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
                 os.remove(tmp_path)
             except:
                 pass
+
+@app.post("/api/feedback")
+def submit_feedback(req: FeedbackRequest):
+    if "nodes" not in LATEST_INFERENCE_CACHE:
+        raise HTTPException(status_code=400, detail="No active inference session to correct.")
+    
+    nodes = LATEST_INFERENCE_CACHE["nodes"]
+    adj = LATEST_INFERENCE_CACHE["adj"]
+    ch_mask = LATEST_INFERENCE_CACHE["ch_mask"]
+    
+    b_size = nodes.shape[0]
+    targets = torch.full((b_size,), req.correct_label, dtype=torch.long, device=DEVICE)
+    
+    try:
+        p23.train()
+        p4.train()
+        p5.train()
+        
+        ONLINE_OPTIMIZER.zero_grad()
+        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=(DEVICE.type=="cuda")):
+            out_p23, _, _ = p23(nodes, adj, ch_mask)
+            cls, _ = p4(out_p23)
+            logits = p5(cls)
+            loss = CRITERION(logits, targets)
+            
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(p23.parameters()) + list(p4.parameters()) + list(p5.parameters()), 1.0)
+        ONLINE_OPTIMIZER.step()
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        p23.eval()
+        p4.eval()
+        p5.eval()
+        
+    return {"status": "success", "message": "Neural weights updated successfully.", "loss": float(loss.item())}
 
 # Mount frontend directory
 if os.path.exists(frontend_dir):
