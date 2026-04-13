@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hugging Face Spaces Deployment Guide - CausalTraj EEG</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background-color: #fcfcfc;
+        }
+        h1, h2, h3 { color: #111827; }
+        h1 { border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; }
+        .step {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        .step-number {
+            display: inline-block;
+            background: #ffcc00; /* Hugging Face Yellow */
+            color: black;
+            width: 28px;
+            height: 28px;
+            text-align: center;
+            line-height: 28px;
+            border-radius: 50%;
+            font-weight: bold;
+            margin-right: 12px;
+        }
+        .step-title {
+            display: flex;
+            align-items: center;
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 0;
+            margin-bottom: 16px;
+            color: #111827;
+        }
+        code {
+            background: #f3f4f6;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.9em;
+            color: #be123c;
+        }
+        pre {
+            background: #1f2937;
+            color: #f8fafc;
+            padding: 16px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 0.9em;
+        }
+        .note {
+            background: #fffbeb;
+            border-left: 4px solid #f59e0b;
+            padding: 12px 16px;
+            margin: 16px 0;
+            border-radius: 0 4px 4px 0;
+        }
+        .note strong { color: #b45309; }
+        a { color: #ea580c; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .btn-print {
+            display: block;
+            width: 200px;
+            margin: 30px auto;
+            padding: 12px 0;
+            text-align: center;
+            background: #111827;
+            color: white;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            border: none;
+        }
+        .btn-print:hover { background: #374151; text-decoration: none; }
+        @media print {
+            body { background: white; max-width: 100%; padding: 0; margin: 20px; }
+            .step { box-shadow: none; border: 1px solid #ddd; break-inside: avoid; }
+            .btn-print { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>🤗 Hugging Face Spaces Deployment Guide</h1>
+    <p>This guide will walk you through deploying your CausalTraj EEG application to a Hugging Face Space. Hugging Face Spaces is a 100% free hosting platform specifically designed for Machine Learning models, and provides an incredible <strong>16GB of RAM and 2 vCPUs completely free</strong>, with no strict HTTP timeouts.</p>
+
+    <div class="note">
+        <strong>Important Prerequisite:</strong> The required <code>Dockerfile</code> has been generated in your project folder. Let's push this directly to a Hugging Face Space.
+    </div>
+
+    <div class="step">
+        <div class="step-title"><span class="step-number">1</span> Create a Hugging Face Account</div>
+        <p>Go to <a href="https://huggingface.co/join" target="_blank">huggingface.co/join</a> and create a free account if you don't already have one.</p>
+    </div>
+
+    <div class="step">
+        <div class="step-title"><span class="step-number">2</span> Create a New Space</div>
+        <ol style="line-height: 1.8;">
+            <li>Go to <a href="https://huggingface.co/spaces" target="_blank">huggingface.co/spaces</a> and click the <strong>"Create new Space"</strong> button at the top right.</li>
+            <li>Give your Space a name (e.g., <code>causaltraj-eeg</code>).</li>
+            <li>Under <strong>"Select the Space SDK"</strong>, you MUST choose <strong>"Docker"</strong>.</li>
+            <li>Under <strong>"Docker template"</strong>, select <strong>"Blank"</strong>.</li>
+            <li>Keep the "Space Hardware" on "Free" (2 vCPU, 16 GB RAM).</li>
+            <li>Click <strong>"Create Space"</strong>.</li>
+        </ol>
+    </div>
+
+    <div class="step">
+        <div class="step-title"><span class="step-number">3</span> Upload Your Files</div>
+        <p>Your new Space is essentially a Git repository hosted by Hugging Face. You can push your code to it! There are two ways to get your code into the space:</p>
+        
+        <p><strong>Option A: Upload via the Browser (Easiest if not using Git CLI)</strong></p>
+        <ol>
+            <li>In your new Space, click on the <strong>"Files"</strong> tab near the top.</li>
+            <li>Click the <strong>"Add file"</strong> dropdown button and select <strong>"Upload files"</strong>.</li>
+            <li>Drag and drop ALL the files and folders from your <code>demoooo</code> folder (including <code>Dockerfile</code>, <code>api.py</code>, the <code>frontend</code> folder, and your <code>model_best.pth</code> checkpoint) into the upload area.</li>
+            <li>Scroll down, optionally add a commit message, and click <strong>"Commit changes"</strong>.</li>
+        </ol>
+
+        <p><strong>Option B: Push via Git</strong></p>
+        <p>You can add the Hugging Face Space as a remote to your existing Git repository and push directly to it:</p>
+        <pre><code>git remote add space https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME
+git push space main</code></pre>
+        <p><em>(You will need an Access Token from your Hugging Face settings to use as your password when pushing via Git).</em></p>
+    </div>
+
+    <div class="step">
+        <div class="step-title"><span class="step-number">4</span> Watch it Build!</div>
+        <p>As soon as you commit or push your code, Hugging Face will automatically detect the <code>Dockerfile</code> and begin building your container.</p>
+        <ul>
+            <li>Click the <strong>"App"</strong> tab to see the live console logs.</li>
+            <li>It will download PyTorch and install your requirements.</li>
+            <li>Once "Building" changes to "Running", your dashboard will appear directly on the page!</li>
+        </ul>
+    </div>
+
+    <div class="step">
+        <div class="step-title"><span class="step-number">5</span> Verifying the App</div>
+        <p>In the logs, look for the following line to ensure your trained models loaded properly:</p>
+        <pre><code>✅ Loaded trained weights from .../model_best.pth</code></pre>
+        <p>If you see <code>⚠️ No checkpoint found</code>, it means you forgot to upload your <code>model_best.pth</code> file to the Space!</p>
+    </div>
+
+    <h2>Need to share it?</h2>
+    <p>Your app is now live! Simply share the URL link of your Space with anyone. They can use the "Live EEG Upload" tab, and they won't experience the 30-second crash you had on Render since Hugging Face allows for heavy ML processing.</p>
+
+    <button class="btn-print" onclick="window.print()">🖨️ Print to PDF</button>
+
+</body>
+</html>
