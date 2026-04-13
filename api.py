@@ -43,16 +43,21 @@ app.add_middleware(
 DEVICE = torch.device("cpu")  # Force CPU — CUDA not available on Render free tier
 
 # ── LAZY MODEL LOADING ─────────────────────────────────────────────────────
-# Models are loaded on first request to avoid consuming 512MB RAM at boot time.
 _models_loaded = False
+_models_lock   = threading.Lock()   # prevents double-load from concurrent threads
 p23 = p4 = p5 = None
 ONLINE_OPTIMIZER = None
 CRITERION = torch.nn.CrossEntropyLoss()
+
+MAX_SEQS_INFER = 8   # max sequences sent to model per request (keeps CPU inference <30s)
 
 def _ensure_models():
     global p23, p4, p5, ONLINE_OPTIMIZER, _models_loaded
     if _models_loaded:
         return
+    with _models_lock:
+        if _models_loaded:   # double-checked locking
+            return
     p23 = UnifiedGraphEncoder().to(DEVICE)
     p4  = TransformerSSL().to(DEVICE)
     p5  = SeizureClassifier().to(DEVICE)
@@ -309,10 +314,15 @@ async def analyze_eeg(nodes_file: UploadFile = File(...), adj_file: UploadFile =
         adj_bytes = await adj_file.read()
         
         nodes_np = np.load(io.BytesIO(nodes_bytes))
-        adj_np = np.load(io.BytesIO(adj_bytes))
-        
+        adj_np   = np.load(io.BytesIO(adj_bytes))
+
+        # Cap sequences to avoid Render's 30s timeout
+        if nodes_np.ndim >= 1 and nodes_np.shape[0] > MAX_SEQS_INFER:
+            nodes_np = nodes_np[:MAX_SEQS_INFER]
+            adj_np   = adj_np[:MAX_SEQS_INFER]
+
         nodes_t = torch.tensor(nodes_np, dtype=torch.float32).to(DEVICE)
-        adj_t = torch.tensor(adj_np, dtype=torch.float32).to(DEVICE)
+        adj_t   = torch.tensor(adj_np,   dtype=torch.float32).to(DEVICE)
         
         labels_t = None
         if labels_file:
