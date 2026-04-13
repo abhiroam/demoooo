@@ -47,12 +47,90 @@ def _ensure_models():
     p23 = UnifiedGraphEncoder().to(DEVICE)
     p4  = TransformerSSL().to(DEVICE)
     p5  = SeizureClassifier().to(DEVICE)
+
+    # ── Load trained checkpoint ──────────────────────────────────────────
+    BASE_DIR = os.path.dirname(__file__)
+    ckpt_candidates = [
+        os.path.join(BASE_DIR, "checkpoints", "model_best.pth"),
+        os.path.join(BASE_DIR, "model_best.pth"),
+    ]
+    ckpt_path = next((p for p in ckpt_candidates if os.path.exists(p)), None)
+    if ckpt_path:
+        try:
+            ckpt = torch.load(ckpt_path, map_location=DEVICE)
+            p23.load_state_dict(ckpt["p23"])
+            p4.load_state_dict(ckpt["p4"])
+            p5.load_state_dict(ckpt["p5"])
+            print(f"✅ Loaded trained weights from {ckpt_path}")
+        except Exception as e:
+            print(f"⚠️  Checkpoint found but failed to load: {e}. Using random weights.")
+    else:
+        print("⚠️  No checkpoint found — using random weights. Place model_best.pth in project root or checkpoints/.")
+
     p23.eval(); p4.eval(); p5.eval()
     ONLINE_OPTIMIZER = torch.optim.AdamW(
         list(p23.parameters()) + list(p4.parameters()) + list(p5.parameters()),
         lr=5e-6, weight_decay=1e-4
     )
     _models_loaded = True
+
+EEG_FEAT_DIM  = 9   # matches person23_graph_encoder.EEG_FEATURE_DIM
+ID_FEAT_DIM   = 16  # matches person23_graph_encoder.ID_FEATURE_DIM
+NUM_CH        = 16  # standard bipolar channels
+NUM_BANDS     = 5
+
+def _normalize_inputs(nodes_t, adj_t):
+    """
+    Accepts nodes/adj in any reasonable format produced by person1.py or the
+    fast inline extractor and normalises them to the exact shapes the model expects:
+        nodes : [S, T, 16, 25]   (9 EEG feats + 16 channel identity)
+        adj   : [S, T, 5, 16, 16]
+    """
+    # ── Nodes ──────────────────────────────────────────────────────────────
+    if nodes_t.dim() == 3:                      # [S, N, F] — missing T dim
+        nodes_t = nodes_t.unsqueeze(1)          # → [S, 1, N, F]
+    S, T, N, F = nodes_t.shape
+
+    # Truncate or pad channels to NUM_CH (16)
+    if N > NUM_CH:
+        nodes_t = nodes_t[:, :, :NUM_CH, :]
+    elif N < NUM_CH:
+        pad = torch.zeros(S, T, NUM_CH - N, F, device=nodes_t.device)
+        nodes_t = torch.cat([nodes_t, pad], dim=2)
+    N = NUM_CH
+
+    # Separate EEG features from possible embedded identity columns
+    eeg_part = nodes_t[..., :min(F, EEG_FEAT_DIM)]   # up to 9 EEG cols
+    if eeg_part.shape[-1] < EEG_FEAT_DIM:             # pad to 9 if fewer
+        pad = torch.zeros(S, T, N, EEG_FEAT_DIM - eeg_part.shape[-1], device=nodes_t.device)
+        eeg_part = torch.cat([eeg_part, pad], dim=-1)
+
+    # Build channel identity [S, T, 16, 16]
+    eye = torch.eye(NUM_CH, device=nodes_t.device).unsqueeze(0).unsqueeze(0).expand(S, T, -1, -1)
+
+    nodes_t = torch.cat([eeg_part, eye], dim=-1)  # → [S, T, 16, 25]
+
+    # ── Adjacency ──────────────────────────────────────────────────────────
+    if adj_t.dim() == 4:                        # [S, T, N, N] — no band dim
+        adj_t = adj_t.unsqueeze(2).expand(-1, -1, NUM_BANDS, -1, -1)
+    Sa, Ta, Bands, Na, Ma = adj_t.shape
+
+    # Truncate / pad bands to 5
+    if Bands > NUM_BANDS:
+        adj_t = adj_t[:, :, :NUM_BANDS, :, :]
+    elif Bands < NUM_BANDS:
+        last = adj_t[:, :, -1:, :, :].expand(-1, -1, NUM_BANDS - Bands, -1, -1)
+        adj_t = torch.cat([adj_t, last], dim=2)
+
+    # Truncate / pad spatial dims to NUM_CH × NUM_CH
+    if Na > NUM_CH or Ma > NUM_CH:
+        adj_t = adj_t[:, :, :, :NUM_CH, :NUM_CH]
+    if Na < NUM_CH or Ma < NUM_CH:
+        tmp = torch.zeros(Sa, Ta, NUM_BANDS, NUM_CH, NUM_CH, device=adj_t.device)
+        tmp[:, :, :, :min(Na, NUM_CH), :min(Ma, NUM_CH)] = adj_t
+        adj_t = tmp
+
+    return nodes_t.to(DEVICE), adj_t.to(DEVICE)
 
 # We serve the frontend dir at the root
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
@@ -100,8 +178,10 @@ def get_training_history():
 
 def _run_pipeline(nodes, adj, labels=None):
     _ensure_models()
+    # Normalise to model's expected shapes regardless of upload format
+    nodes, adj = _normalize_inputs(nodes, adj)
     # Dummy channel mask
-    ch_mask = torch.ones(16, dtype=torch.float32).to(DEVICE)
+    ch_mask = torch.ones(NUM_CH, dtype=torch.float32).to(DEVICE)
     
     # Cache for HITL feedback
     LATEST_INFERENCE_CACHE["nodes"] = nodes.detach().clone()
@@ -193,39 +273,25 @@ def _run_pipeline(nodes, adj, labels=None):
 
 @app.get("/api/demo")
 def run_demo(n_samples: int = 16):
-    _ensure_models()
-    # Gen random shapes
-    # Shape according to main (1).py: nodes [S, 10, 16, 25], adj [S, 10, 5, 16, 16]
-    nodes = torch.randn((n_samples, 10, 16, 25), dtype=torch.float32).to(DEVICE)
-    adj = torch.rand((n_samples, 10, 5, 16, 16), dtype=torch.float32).to(DEVICE)
-    labels = torch.randint(0, 3, (n_samples,), dtype=torch.long).to(DEVICE)
-    
-    try:
-        return _run_pipeline(nodes, adj, labels)
-    except Exception as e:
-        # Fallback to pure mock if model throws error currently over untrained shapes
-        import random
-        # Generating synthetic realistic trajectory that looks like an EEG graph
-        trajectory = []
-        for _ in range(n_samples):
-            # create wave-like pattern for each dimension
-            traj_pt = [np.sin(i * 0.5 + random.random()) * 0.5 + 0.5 for i in range(16)]
-            trajectory.append(traj_pt)
-
-        return {
-            "prediction_label": "High Risk (Demo)",
-            "mean_risk": random.uniform(0.7, 0.9),
-            "n_samples": n_samples,
-            "demo_mode": True,
-            "band_contributions": {"delta": 0.45, "theta": 0.25, "alpha": 0.15, "beta": 0.1, "gamma": 0.05},
-            "driver_channels": ["FP1-F7", "FP2-F8", "T3-T5"],
-            "risk_scores": [random.uniform(0.3, 0.9) for _ in range(n_samples)],
-            "confidence_lower": [random.uniform(0.1, 0.3) for _ in range(n_samples)],
-            "confidence_upper": [random.uniform(0.6, 1.0) for _ in range(n_samples)],
-            "trajectory": trajectory,
-            "labels": [2 if random.random() > 0.5 else 1 for _ in range(n_samples)],
-            "input_signals": []
-        }
+    import random, math
+    # Pure fast mock — no model loading. Keeps Risk Analytics tab snappy on Render free tier.
+    trajectory = [[math.sin(i * 0.4 + random.random()*2) * 0.4 + 0.5 for i in range(16)] for _ in range(n_samples)]
+    base = random.uniform(0.55, 0.85)
+    risk_scores = [min(1.0, max(0.0, base + math.sin(i*0.6)*0.15 + random.uniform(-0.05,0.05))) for i in range(n_samples)]
+    return {
+        "prediction_label": "High Risk (Demo)" if base > 0.65 else "Pre-ictal (Demo)",
+        "mean_risk": float(np.mean(risk_scores)),
+        "n_samples": n_samples,
+        "demo_mode": True,
+        "band_contributions": {"delta": 0.42, "theta": 0.24, "alpha": 0.16, "beta": 0.12, "gamma": 0.06},
+        "driver_channels": ["FP1-F7", "FP2-F8", "T3-T5", "C3-P3"],
+        "risk_scores": risk_scores,
+        "confidence_lower": [max(0.0, s - random.uniform(0.08,0.14)) for s in risk_scores],
+        "confidence_upper": [min(1.0, s + random.uniform(0.08,0.14)) for s in risk_scores],
+        "trajectory": trajectory,
+        "labels": [2 if s > 0.65 else (1 if s > 0.35 else 0) for s in risk_scores],
+        "input_signals": []
+    }
 
 @app.post("/api/analyze")
 async def analyze_eeg(nodes_file: UploadFile = File(...), adj_file: UploadFile = File(...), labels_file: UploadFile = None):

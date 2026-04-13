@@ -155,6 +155,7 @@ function renderBandBars(bands){
 }
 
 function renderRiskSVG(scores, lower, upper, labels){
+  if(!scores || scores.length < 2) return '<div class="flex items-center justify-center h-full text-outline text-sm">No risk data yet — run an analysis first.</div>';
   const N=scores.length, W=700, H=200, PAD=36;
   const gw=W-PAD*2, gh=H-PAD*2-16;
   const x=i=>(PAD+i*(gw/(N-1))).toFixed(1);
