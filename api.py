@@ -271,10 +271,14 @@ def _run_pipeline(nodes, adj, labels=None):
             input_signals.append(sig)
 
     import math
+    import numpy as np
 
     def sanitize_val(v):
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return 0.0
+        # Handle both standard Python floats and numpy float types
+        if isinstance(v, (float, np.floating)):
+            if math.isnan(v) or math.isinf(v):
+                return 0.0
+            return float(v)
         if isinstance(v, list):
             return [sanitize_val(x) for x in v]
         if isinstance(v, dict):
