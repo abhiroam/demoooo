@@ -67,6 +67,8 @@ def _ensure_models():
     ckpt_candidates = [
         os.path.join(BASE_DIR, "checkpoints", "model_best.pth"),
         os.path.join(BASE_DIR, "model_best.pth"),
+        os.path.join(BASE_DIR, "checkpoints", "model.pth"),
+        os.path.join(BASE_DIR, "model.pth"),
     ]
     ckpt_path = next((p for p in ckpt_candidates if os.path.exists(p)), None)
     if ckpt_path:
