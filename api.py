@@ -15,12 +15,21 @@ import tempfile
 import mne
 from pydantic import BaseModel
 
+import threading
+from contextlib import asynccontextmanager
+
 class FeedbackRequest(BaseModel):
     correct_label: int  # 0: Stable, 1: Pre-ictal, 2: Seizure
 
 LATEST_INFERENCE_CACHE = {}
 
-app = FastAPI(title="CausalTraj-EEG API")
+@asynccontextmanager
+async def lifespan(app):
+    """Pre-warm models in the background immediately on server start."""
+    threading.Thread(target=_ensure_models, daemon=True).start()
+    yield
+
+app = FastAPI(title="CausalTraj-EEG API", lifespan=lifespan)
 
 # Setup CORS
 app.add_middleware(

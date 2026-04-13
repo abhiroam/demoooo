@@ -809,12 +809,25 @@ window.handleAnalyzeUpload = async function(e){
   }
   
   try{
-    const r=await fetch(url,{method:'POST',body:fd});
-    const data=await r.json();
+    const r = await fetch(url, {method:'POST', body:fd});
+    let data;
+    try { data = await r.json(); }
+    catch(jsonErr) {
+      // Server returned non-JSON (e.g. Render 504 timeout page)
+      document.getElementById('upload-result').innerHTML =
+        '<p class="text-warning text-sm">⏳ Server is warming up — models are loading. Please wait ~30 seconds and try again.</p>';
+      document.getElementById('upload-result').classList.remove('hidden');
+      btn.innerHTML='<span class="material-symbols-outlined">rocket_launch</span>Run Analysis';btn.disabled=false;
+      return;
+    }
     if(r.ok){ window.lastResult=data; window.showEEGResult(data); }
-    else { document.getElementById('upload-result').innerHTML='<p class="text-error text-sm">Error: '+data.detail+'</p>'; document.getElementById('upload-result').classList.remove('hidden'); }
+    else {
+      document.getElementById('upload-result').innerHTML='<p class="text-error text-sm">Error: '+data.detail+'</p>';
+      document.getElementById('upload-result').classList.remove('hidden');
+    }
   }catch(err){
-    document.getElementById('upload-result').innerHTML='<p class="text-error text-sm">Connection error. Is the server running?</p>';
+    document.getElementById('upload-result').innerHTML=
+      '<p class="text-error text-sm">Connection error — check your internet or server status.</p>';
     document.getElementById('upload-result').classList.remove('hidden');
   }
   btn.innerHTML='<span class="material-symbols-outlined">rocket_launch</span>Run Analysis';btn.disabled=false;
