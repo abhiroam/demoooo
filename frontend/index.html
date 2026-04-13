@@ -495,6 +495,29 @@ const screens = {
               </div>`).join('') || '<p class="text-xs text-outline">No driver channels available</p>'}
             </div>
           </div>
+
+          <div class="bg-surface-container-low rounded-2xl p-6 border border-outline-variant/20" id="hitl-panel">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="material-symbols-outlined text-sm text-secondary">psychology</span>
+              <h4 class="text-sm font-bold">Human-in-the-Loop</h4>
+            </div>
+            <p class="text-[10px] text-outline mb-4 leading-relaxed">Is the model correct? Verify or correct the prediction. The model will learn from your expertise instantly.</p>
+            <div class="space-y-2">
+              <button onclick="window.submitFeedback(-1)" class="w-full flex items-center gap-2 px-4 py-2.5 bg-tertiary/10 hover:bg-tertiary/20 border border-tertiary/30 text-tertiary rounded-xl text-xs font-bold transition-all active:scale-95">
+                <span class="material-symbols-outlined text-base">check_circle</span> Prediction Correct
+              </button>
+              <button onclick="window.submitFeedback(0)" class="w-full flex items-center gap-2 px-4 py-2.5 bg-surface-container-high hover:bg-surface-container-highest border border-outline-variant/30 text-on-surface-variant rounded-xl text-xs font-bold transition-all active:scale-95">
+                <span class="material-symbols-outlined text-base">monitor_heart</span> Mark as Stable
+              </button>
+              <button onclick="window.submitFeedback(1)" class="w-full flex items-center gap-2 px-4 py-2.5 bg-secondary/10 hover:bg-secondary/20 border border-secondary/30 text-secondary rounded-xl text-xs font-bold transition-all active:scale-95">
+                <span class="material-symbols-outlined text-base">warning</span> Mark as Pre-ictal
+              </button>
+              <button onclick="window.submitFeedback(2)" class="w-full flex items-center gap-2 px-4 py-2.5 bg-error/10 hover:bg-error/20 border border-error/30 text-error rounded-xl text-xs font-bold transition-all active:scale-95">
+                <span class="material-symbols-outlined text-base">crisis_alert</span> Mark as Seizure
+              </button>
+            </div>
+            <div id="hitl-status" class="mt-3 hidden"></div>
+          </div>
         </div>
       </div>`;
     }
@@ -900,6 +923,62 @@ window.renderInputEEG = function(signals) {
 window.runDemoFromEEG = async function(){
   const data=await fetch(API+'/api/demo?n_samples=12').then(r=>r.json());
   window.lastResult=data; window.showEEGResult(data);
+};
+
+window.submitFeedback = async function(label) {
+  const statusEl = document.getElementById('hitl-status');
+
+  // label = -1 means "Confirm Correct" — no training needed, just UI ack
+  if (label === -1) {
+    if (statusEl) {
+      statusEl.className = 'mt-3 p-3 rounded-xl bg-tertiary/10 border border-tertiary/30 text-tertiary text-xs font-bold flex items-center gap-2';
+      statusEl.innerHTML = '<span class="material-symbols-outlined text-base">verified</span> Confirmed. Model prediction logged as correct.';
+      statusEl.classList.remove('hidden');
+    }
+    return;
+  }
+
+  const labelNames = {0: 'Stable', 1: 'Pre-ictal', 2: 'Seizure'};
+  const labelColors = {0: 'text-on-surface-variant border-outline-variant/30 bg-surface-container-high', 1: 'text-secondary border-secondary/30 bg-secondary/10', 2: 'text-error border-error/30 bg-error/10'};
+
+  if (statusEl) {
+    statusEl.className = `mt-3 p-3 rounded-xl border ${labelColors[label]} text-xs font-bold flex items-center gap-2`;
+    statusEl.innerHTML = `<span class="material-symbols-outlined text-base animate-spin" style="animation:spin 1s linear infinite">autorenew</span> Updating neural weights for "${labelNames[label]}"...`;
+    statusEl.classList.remove('hidden');
+  }
+
+  try {
+    const r = await fetch(API + '/api/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({correct_label: label})
+    });
+    const data = await r.json();
+
+    if (r.ok) {
+      if (statusEl) {
+        statusEl.innerHTML = `<span class="material-symbols-outlined text-base">model_training</span> 
+          Model updated! Learned "${labelNames[label]}". Loss: ${data.loss?.toFixed(4) ?? 'N/A'}`;
+      }
+      // Pulse the HITL panel to visualise the update
+      const panel = document.getElementById('hitl-panel');
+      if (panel) {
+        panel.style.transition = 'box-shadow 0.3s ease';
+        panel.style.boxShadow = label===2 ? '0 0 20px rgba(255,180,171,0.4)' : label===1 ? '0 0 20px rgba(184,202,205,0.4)' : '0 0 20px rgba(102,217,204,0.4)';
+        setTimeout(() => { panel.style.boxShadow = ''; }, 1800);
+      }
+    } else {
+      if (statusEl) {
+        statusEl.className = 'mt-3 p-3 rounded-xl bg-error/10 border border-error/30 text-error text-xs font-bold flex items-center gap-2';
+        statusEl.innerHTML = `<span class="material-symbols-outlined text-base">error</span> Error: ${data.detail || 'Unknown error'}`;
+      }
+    }
+  } catch(err) {
+    if (statusEl) {
+      statusEl.className = 'mt-3 p-3 rounded-xl bg-error/10 border border-error/30 text-error text-xs font-bold flex items-center gap-2';
+      statusEl.innerHTML = '<span class="material-symbols-outlined text-base">wifi_off</span> Connection error. Is the server running?';
+    }
+  }
 };
 
 boot();

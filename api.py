@@ -32,24 +32,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")  # Force CPU — CUDA not available on Render free tier
 
-# Initialize Models globally
-p23 = UnifiedGraphEncoder().to(DEVICE)
-p4  = TransformerSSL().to(DEVICE)
-p5  = SeizureClassifier().to(DEVICE)
-
-# Note: Loading trained weights normally happens here
-p23.eval()
-p4.eval()
-p5.eval()
-
-# HITL Online Optimizer
-ONLINE_OPTIMIZER = torch.optim.AdamW(
-    list(p23.parameters()) + list(p4.parameters()) + list(p5.parameters()), 
-    lr=5e-6, weight_decay=1e-4
-)
+# ── LAZY MODEL LOADING ─────────────────────────────────────────────────────
+# Models are loaded on first request to avoid consuming 512MB RAM at boot time.
+_models_loaded = False
+p23 = p4 = p5 = None
+ONLINE_OPTIMIZER = None
 CRITERION = torch.nn.CrossEntropyLoss()
+
+def _ensure_models():
+    global p23, p4, p5, ONLINE_OPTIMIZER, _models_loaded
+    if _models_loaded:
+        return
+    p23 = UnifiedGraphEncoder().to(DEVICE)
+    p4  = TransformerSSL().to(DEVICE)
+    p5  = SeizureClassifier().to(DEVICE)
+    p23.eval(); p4.eval(); p5.eval()
+    ONLINE_OPTIMIZER = torch.optim.AdamW(
+        list(p23.parameters()) + list(p4.parameters()) + list(p5.parameters()),
+        lr=5e-6, weight_decay=1e-4
+    )
+    _models_loaded = True
 
 # We serve the frontend dir at the root
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
@@ -96,6 +100,7 @@ def get_training_history():
     }
 
 def _run_pipeline(nodes, adj, labels=None):
+    _ensure_models()
     # Dummy channel mask
     ch_mask = torch.ones(16, dtype=torch.float32).to(DEVICE)
     
@@ -180,6 +185,7 @@ def _run_pipeline(nodes, adj, labels=None):
 
 @app.get("/api/demo")
 def run_demo(n_samples: int = 16):
+    _ensure_models()
     # Gen random shapes
     # Shape according to main (1).py: nodes [S, 10, 16, 25], adj [S, 10, 5, 16, 16]
     nodes = torch.randn((n_samples, 10, 16, 25), dtype=torch.float32).to(DEVICE)
@@ -272,6 +278,7 @@ async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
 
 @app.post("/api/feedback")
 def submit_feedback(req: FeedbackRequest):
+    _ensure_models()
     if "nodes" not in LATEST_INFERENCE_CACHE:
         raise HTTPException(status_code=400, detail="No active inference session to correct.")
     
@@ -288,7 +295,8 @@ def submit_feedback(req: FeedbackRequest):
         p5.train()
         
         ONLINE_OPTIMIZER.zero_grad()
-        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=(DEVICE.type=="cuda")):
+        # autocast only used on CUDA; on CPU we run in full float32
+        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=(DEVICE.type == "cuda")):
             out_p23, _, _ = p23(nodes, adj, ch_mask)
             cls, _ = p4(out_p23)
             logits = p5(cls)
