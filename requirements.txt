@@ -4,3 +4,6 @@ python-multipart
 torch
 numpy
 scikit-learn
+mne
+antropy
+scipy

@@ -345,13 +345,27 @@ const screens = {
           <p class="text-sm text-outline mt-1">Upload your preprocessed graph .npy files to run the full pipeline</p>
         </div>
         <div class="bg-surface-container-low rounded-2xl p-8">
+          <div class="flex gap-4 mb-6 border-b border-outline-variant/20 pb-4">
+            <button type="button" class="text-sm font-bold border-b-2 border-primary text-primary transition-colors hover:text-primary pb-2 -mb-[18px]" onclick="window.switchUploadTab('raw')" id="tab-raw">Raw EEG (.edf)</button>
+            <button type="button" class="text-sm font-bold text-outline hover:text-on-surface transition-colors pb-2 -mb-[18px] border-b-2 border-transparent" onclick="window.switchUploadTab('graph')" id="tab-graph">Graph Data (.npy)</button>
+          </div>
           <form id="upload-form" class="space-y-6" onsubmit="window.handleAnalyzeUpload(event)">
-            <div class="grid grid-cols-1 gap-4">
+            <div id="upload-raw" class="grid grid-cols-1 gap-4">
+              <label class="block">
+                <p class="text-[10px] uppercase text-outline font-bold mb-2">Raw EEG Source File</p>
+                <div class="flex items-center gap-3 p-4 bg-surface-container-high rounded-xl border border-outline-variant/20 hover:border-primary/40 transition-colors cursor-pointer" onclick="document.getElementById('edf-file').click()">
+                  <span class="material-symbols-outlined text-primary">waves</span>
+                  <span class="text-sm text-on-surface-variant" id="edf-file-label">Choose .edf file...</span>
+                  <input type="file" id="edf-file" accept=".edf" class="hidden" onchange="document.getElementById('edf-file-label').textContent=this.files[0]?.name||'Choose .edf file...'"/>
+                </div>
+              </label>
+            </div>
+            <div id="upload-graph" class="hidden grid-cols-1 gap-4">
               ${[['nodes-file','*_nodes.npy','Nodes file [S,10,16,25]','blur_on'],['adj-file','*_adj.npy','Adjacency file [S,10,5,16,16]','hub'],['labels-file','*_labels.npy (optional)','Labels file [S,] — optional','label']].map(([id,ph,label,icon])=>`
               <label class="block">
                 <p class="text-[10px] uppercase text-outline font-bold mb-2">${label}</p>
                 <div class="flex items-center gap-3 p-4 bg-surface-container-high rounded-xl border border-outline-variant/20 hover:border-primary/40 transition-colors cursor-pointer" onclick="document.getElementById('${id}').click()">
-                  <span class="material-symbols-outlined text-primary">${icon}</span>
+                  <span class="material-symbols-outlined text-outline">${icon}</span>
                   <span class="text-sm text-on-surface-variant" id="${id}-label">Choose file...</span>
                   <input type="file" id="${id}" accept=".npy" class="hidden" onchange="document.getElementById('${id}-label').textContent=this.files[0]?.name||'Choose file...'"/>
                 </div>
@@ -382,8 +396,8 @@ const screens = {
               <span class="text-[10px] font-bold w-8" style="color:${clr}">${ch}</span>
               <div class="flex-1 h-9 overflow-hidden relative">
                 <svg class="absolute left-0 top-0 h-full" style="width:200%;animation:eeg-scroll ${dur}s linear infinite;" viewBox="0 0 1920 32" preserveAspectRatio="none">
-                  <polyline points="${pts}" fill="none" stroke="${clr}" stroke-width="1.2" opacity="0.9"/>
-                  <polyline points="${pts2}" fill="none" stroke="${clr}" stroke-width="1.2" opacity="0.9"/>
+                  <polyline id="live-eeg-p1-${i}" points="${pts}" fill="none" stroke="${clr}" stroke-width="1.2" opacity="0.9"/>
+                  <polyline id="live-eeg-p2-${i}" points="${pts2}" fill="none" stroke="${clr}" stroke-width="1.2" opacity="0.9"/>
                 </svg>
               </div>
               <span class="text-[10px] text-outline-variant font-mono w-14 text-right">${amp.toFixed(1)}μV</span>
@@ -716,19 +730,51 @@ async function switchTab(id){
   }, 400); // Wait for exit animation to complete
 }
 
+window.switchUploadTab = function(mode){
+  const traw = document.getElementById('tab-raw');
+  const tgraph = document.getElementById('tab-graph');
+  const draw = document.getElementById('upload-raw');
+  const dgraph = document.getElementById('upload-graph');
+  if(!traw || !tgraph) return;
+  if(mode === 'raw'){
+    traw.className = 'text-sm font-bold border-b-2 border-primary text-primary transition-colors hover:text-primary pb-2 -mb-[18px]';
+    tgraph.className = 'text-sm font-bold text-outline hover:text-on-surface transition-colors pb-2 -mb-[18px] border-b-2 border-transparent';
+    draw.classList.remove('hidden'); draw.classList.add('grid');
+    dgraph.classList.add('hidden'); dgraph.classList.remove('grid');
+  }else{
+    tgraph.className = 'text-sm font-bold border-b-2 border-primary text-primary transition-colors hover:text-primary pb-2 -mb-[18px]';
+    traw.className = 'text-sm font-bold text-outline hover:text-on-surface transition-colors pb-2 -mb-[18px] border-b-2 border-transparent';
+    dgraph.classList.remove('hidden'); dgraph.classList.add('grid');
+    draw.classList.add('hidden'); draw.classList.remove('grid');
+  }
+};
+
 window.handleAnalyzeUpload = async function(e){
   e.preventDefault();
-  const nf=document.getElementById('nodes-file').files[0];
-  const af=document.getElementById('adj-file').files[0];
-  if(!nf||!af){alert('Please select nodes and adj files.');return;}
   const btn=e.target.querySelector('[type=submit]');
   btn.textContent='Analyzing...';btn.disabled=true;
+  
   const fd=new FormData();
-  fd.append('nodes_file',nf);fd.append('adj_file',af);
-  const lf=document.getElementById('labels-file').files[0];
-  if(lf) fd.append('labels_file',lf);
+  let url = API+'/api/analyze';
+  const draw = document.getElementById('upload-raw');
+  const isRaw = draw && !draw.classList.contains('hidden');
+  
+  if (isRaw) {
+    const ef=document.getElementById('edf-file').files[0];
+    if(!ef) { alert('Please select an EDF file.'); btn.innerHTML='<span class="material-symbols-outlined">rocket_launch</span>Run Analysis';btn.disabled=false;return; }
+    fd.append('edf_file', ef);
+    url = API+'/api/analyze-raw';
+  } else {
+    const nf=document.getElementById('nodes-file').files[0];
+    const af=document.getElementById('adj-file').files[0];
+    if(!nf||!af){alert('Please select nodes and adj files.');btn.innerHTML='<span class="material-symbols-outlined">rocket_launch</span>Run Analysis';btn.disabled=false;return;}
+    fd.append('nodes_file',nf);fd.append('adj_file',af);
+    const lf=document.getElementById('labels-file').files[0];
+    if(lf) fd.append('labels_file',lf);
+  }
+  
   try{
-    const r=await fetch(API+'/api/analyze',{method:'POST',body:fd});
+    const r=await fetch(url,{method:'POST',body:fd});
     const data=await r.json();
     if(r.ok){ window.lastResult=data; window.showEEGResult(data); }
     else { document.getElementById('upload-result').innerHTML='<p class="text-error text-sm">Error: '+data.detail+'</p>'; document.getElementById('upload-result').classList.remove('hidden'); }
@@ -748,29 +794,90 @@ window.showEEGResult = function(data){
   }
   if (data.input_signals && data.input_signals.length > 0) {
     const container = document.getElementById('live-eeg-preview-container');
-    if (container) container.innerHTML = window.renderInputEEG(data.input_signals);
+    if (container) {
+       const renderHtml = window.renderInputEEG(data.input_signals);
+       if(renderHtml !== null) {
+          container.innerHTML = renderHtml;
+       }
+    }
   }
 };
 
+window.morphSVGPolyline = function(elem, newPointsStr) {
+  if (!elem) return;
+  const oldPts = (elem.getAttribute('points') || '').trim().split(/\s+/).map(p => {
+    let [x,y] = p.split(',').map(Number); return [x||0, y||0];
+  });
+  const newPts = newPointsStr.trim().split(/\s+/).map(p => {
+    let [x,y] = p.split(',').map(Number); return [x||0, y||0];
+  });
+  
+  if(oldPts.length === 0 || oldPts.length !== newPts.length || oldPts[0][1] === undefined || isNaN(oldPts[0][1])) {
+    elem.setAttribute('points', newPointsStr);
+    return;
+  }
+  const frames = 45; // Smooth animation over 45 frames
+  let frame = 0;
+  function animate() {
+     frame++;
+     const t = frame / frames;
+     const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; // easeInOutCubic
+     let morphed = '';
+     for(let i=0; i<newPts.length; i++) {
+        let x = newPts[i][0];
+        let y = oldPts[i][1] + (newPts[i][1] - oldPts[i][1]) * ease;
+        morphed += `${x},${y} `;
+     }
+     elem.setAttribute('points', morphed.trim());
+     if (frame < frames) requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+};
+
 window.renderInputEEG = function(signals) {
-  let html = '';
+  // Try to mould existing elements first
+  let canMorph = true;
+  for(let i=0; i<6; i++) {
+    if(!document.getElementById(`live-eeg-p1-${i}`)) canMorph = false;
+  }
+  
   const channels = ['FP1', 'FP2', 'C3', 'C4', 'T3', 'T5'];
   const colors = ['#5dd6f3', '#b8cacd', '#66d9cc', '#5dd6f3', '#b8cacd', '#66d9cc'];
   const durs = [3.2, 2.8, 3.6, 2.5, 3.0, 2.3];
 
+  if(canMorph) {
+    signals.forEach((sig, i) => {
+      if(i >= 6 || sig.length === 0) return;
+      const len = sig.length;
+      const meanV = sig.reduce((a,b)=>a+b,0)/len;
+      const stdV = Math.max(0.01, Math.sqrt(sig.reduce((a,b)=>a+Math.pow(b-meanV,2),0)/len));
+      let pts = '', pts2 = '';
+      const numPts = Math.min(len, 80);
+      const step = len / numPts;
+      for(let k=0; k<numPts; k++) {
+        let val = sig[Math.floor(k * step)] || 0;
+        let scaled = 16 + ((val - meanV) / stdV) * 8;
+        pts += `${k*(960/numPts)},${scaled} `;
+        pts2 += `${k*(960/numPts) + 960},${scaled} `;
+      }
+      window.morphSVGPolyline(document.getElementById(`live-eeg-p1-${i}`), pts);
+      window.morphSVGPolyline(document.getElementById(`live-eeg-p2-${i}`), pts2);
+    });
+    return null; // Signals morphed, no new HTML string to inject
+  }
+
+  // Fallback to initial render
+  let html = '';
   signals.forEach((sig, i) => {
-    if(i >= 6) return;
+    if(i >= 6 || sig.length === 0) return;
     const len = sig.length;
-    if(len === 0) return;
     const meanV = sig.reduce((a,b)=>a+b,0)/len;
     const stdV = Math.max(0.01, Math.sqrt(sig.reduce((a,b)=>a+Math.pow(b-meanV,2),0)/len));
-    
     let pts = '', pts2 = '';
     const numPts = Math.min(len, 80);
     const step = len / numPts;
     for(let k=0; k<numPts; k++) {
-      let idx = Math.floor(k * step);
-      let val = sig[idx] || 0;
+      let val = sig[Math.floor(k * step)] || 0;
       let scaled = 16 + ((val - meanV) / stdV) * 8;
       pts += `${k*(960/numPts)},${scaled} `;
       pts2 += `${k*(960/numPts) + 960},${scaled} `;
@@ -780,8 +887,8 @@ window.renderInputEEG = function(signals) {
       <span class="text-[10px] font-bold w-8" style="color:${colors[i]}">${channels[i]||('Ch'+(i+1))}</span>
       <div class="flex-1 h-9 overflow-hidden relative">
         <svg class="absolute left-0 top-0 h-full" style="width:200%;animation:eeg-scroll ${durs[i]}s linear infinite;" viewBox="0 0 1920 32" preserveAspectRatio="none">
-          <polyline points="${pts}" fill="none" stroke="${colors[i]}" stroke-width="1.2" opacity="0.9"/>
-          <polyline points="${pts2}" fill="none" stroke="${colors[i]}" stroke-width="1.2" opacity="0.9"/>
+          <polyline id="live-eeg-p1-${i}" points="${pts}" fill="none" stroke="${colors[i]}" stroke-width="1.2" opacity="0.9"/>
+          <polyline id="live-eeg-p2-${i}" points="${pts2}" fill="none" stroke="${colors[i]}" stroke-width="1.2" opacity="0.9"/>
         </svg>
       </div>
       <span class="text-[10px] text-outline-variant font-mono w-14 text-right">Extracted</span>

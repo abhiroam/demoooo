@@ -11,6 +11,9 @@ from person23_graph_encoder import UnifiedGraphEncoder
 from person4_transformer import TransformerSSL
 from Person5 import SeizureClassifier
 from analysis import run_analysis
+from person1 import create_epochs, build_sequences
+import tempfile
+import mne
 
 app = FastAPI(title="CausalTraj-EEG API")
 
@@ -214,6 +217,40 @@ async def analyze_eeg(nodes_file: UploadFile = File(...), adj_file: UploadFile =
         return _run_pipeline(nodes_t, adj_t, labels_t)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/analyze-raw")
+async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
+    tmp_path = None
+    try:
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".edf")
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(await edf_file.read())
+            
+        raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+        # Empty seizures list so it assumes labels = 0 (stable)
+        epochs, labels = create_epochs(raw, [])
+        seq_data, err = build_sequences(epochs, labels)
+        
+        if seq_data is None:
+            raise HTTPException(status_code=400, detail=f"Failed to extract graphs: {err}")
+            
+        nodes_np, adj_np, seq_labels = seq_data
+        
+        nodes_t = torch.tensor(nodes_np, dtype=torch.float32).to(DEVICE)
+        adj_t = torch.tensor(adj_np, dtype=torch.float32).to(DEVICE)
+        labels_t = torch.tensor(seq_labels, dtype=torch.long).to(DEVICE)
+        
+        return _run_pipeline(nodes_t, adj_t, labels_t)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
 
 # Mount frontend directory
 if os.path.exists(frontend_dir):
