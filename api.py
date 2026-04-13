@@ -270,7 +270,18 @@ def _run_pipeline(nodes, adj, labels=None):
             sig = nodes[0, 0, c, :].detach().cpu().numpy().tolist()
             input_signals.append(sig)
 
-    return {
+    import math
+
+    def sanitize_val(v):
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return 0.0
+        if isinstance(v, list):
+            return [sanitize_val(x) for x in v]
+        if isinstance(v, dict):
+            return {k: sanitize_val(val) for k, val in v.items()}
+        return v
+
+    raw_response = {
         "prediction_label": "High Risk" if mean_risk > 0.65 else ("Pre-ictal" if mean_risk > 0.35 else "Stable"),
         "mean_risk": mean_risk,
         "n_samples": len(nodes),
@@ -284,6 +295,7 @@ def _run_pipeline(nodes, adj, labels=None):
         "labels": risk_plot.get("gt", []),
         "input_signals": input_signals
     }
+    return sanitize_val(raw_response)
 
 @app.get("/api/demo")
 def run_demo(n_samples: int = 16):
