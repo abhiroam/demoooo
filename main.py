@@ -9,7 +9,8 @@ from Person5 import SeizureClassifier
 from analysis import run_analysis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DATA_DIR = "c:/Users/Abhi/Downloads/demoooo/graph_output"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "graph_output")
 
 # ── 1. Load data ──
 files = os.listdir(DATA_DIR)

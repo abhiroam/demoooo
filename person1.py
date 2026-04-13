@@ -16,10 +16,10 @@ from scipy.signal import welch as scipy_welch
 
 mne.set_log_level("WARNING")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
-
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = {
-    "data_root": "c:/Users/Abhi/Downloads/demoooo",   # 🔥 IMPORTANT
-    "output_dir": "c:/Users/Abhi/Downloads/demoooo/graph_output",
+    "data_root": BASE_DIR,   # 🔥 IMPORTANT
+    "output_dir": os.path.join(BASE_DIR, "graph_output"),
     "sfreq": 256,
     "epoch_duration": 4.0,
     "epoch_overlap": 0.25,

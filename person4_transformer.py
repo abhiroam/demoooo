@@ -14,10 +14,11 @@ from torch.utils.data import Dataset, DataLoader
 from person23_graph_encoder import UnifiedGraphEncoder
 
 # ── DIRS ──
-# ✅ FIX: Pointing directly to Graph Output
-GRAPH_DIR  = "/content/drive/MyDrive/TUH_EEG_SEIZURE_v2/graph_output"
-OUTPUT_DIR = "/content/drive/MyDrive/TUH_EEG_SEIZURE_v2/transformer_output"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GRAPH_DIR  = os.path.join(BASE_DIR, "graph_output")
+OUTPUT_DIR = os.path.join(BASE_DIR, "transformer_output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(GRAPH_DIR, exist_ok=True)
 
 # ── CONSTANTS ──
 D_MODEL     = 512
