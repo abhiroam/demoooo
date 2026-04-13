@@ -308,7 +308,7 @@ def run_demo(n_samples: int = 16):
     }
 
 @app.post("/api/analyze")
-async def analyze_eeg(nodes_file: UploadFile = File(...), adj_file: UploadFile = File(...), labels_file: UploadFile = None):
+async def analyze_eeg(nodes_file: UploadFile = File(...), adj_file: UploadFile = File(...), labels_file: UploadFile = File(None)):
     try:
         nodes_bytes = await nodes_file.read()
         adj_bytes = await adj_file.read()
