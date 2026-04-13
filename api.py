@@ -260,17 +260,16 @@ async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
 
         raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
 
-        # ── Fast inline feature extraction (no antropy, no multiprocessing) ──
-        SFREQ      = raw.info["sfreq"]
-        WIN_SEC    = 4.0
-        OVERLAP    = 0.25
-        SEQ_LEN    = 10
-        NUM_CH     = 16
-        MAX_SEQS   = 24   # Stay within Render's 30s timeout
-        BANDS = [(0.5,4),(4,8),(8,13),(13,30),(30,40)]  # delta,theta,alpha,beta,gamma
+        # ── Fast inline feature extraction ──────────────────────────────────
+        SFREQ    = raw.info["sfreq"]
+        WIN_SEC  = 4.0
+        OVERLAP  = 0.25
+        SEQ_LEN  = 10
+        NUM_CH   = 16
+        MAX_SEQS = 6        # Keep well inside Render's 30s hard timeout
+        BANDS = [(0.5,4),(4,8),(8,13),(13,30),(30,40)]
 
-        data = raw.get_data()
-        # Truncate to first NUM_CH channels if more exist, pad zeros if fewer
+        data = raw.get_data().astype(np.float32)
         if data.shape[0] >= NUM_CH:
             data = data[:NUM_CH, :]
         else:
@@ -280,73 +279,66 @@ async def analyze_raw_eeg(edf_file: UploadFile = File(...)):
         win   = int(WIN_SEC * SFREQ)
         step  = int(win * (1 - OVERLAP))
         n_pts = data.shape[1]
-        from scipy.signal import welch as _welch
-        from scipy.stats import kurtosis as _kurtosis
 
-        def _epoch_features(seg):
-            """[NUM_CH, WIN] -> [NUM_CH, 9]  (5 band-PSDs + std + kurtosis + hjorth_mob + hjorth_comp)"""
-            freqs, psd = _welch(seg, SFREQ, nperseg=min(512, win))
-            band_feats = []
+        from scipy.signal import welch as _welch
+
+        # Shared identity matrix — used as base adj (no per-band filtering)
+        IDENTITY_ADJ = np.eye(NUM_CH, dtype=np.float32)
+        IDENTITY_ADJ_5 = np.stack([IDENTITY_ADJ] * 5, axis=0)  # [5, 16, 16]
+        CHANNEL_EYE   = np.eye(NUM_CH, dtype=np.float32)        # channel identity features
+
+        def _epoch_fast(seg):
+            """seg: [16, WIN] -> nodes [16,25], adj [5,16,16]  — no scipy filters"""
+            # ── Band PSDs via Welch (one call for all channels) ──
+            freqs, psd = _welch(seg, SFREQ, nperseg=min(256, win))  # nperseg=256 for speed
+            band_cols = []
             for (lo, hi) in BANDS:
                 idx = (freqs >= lo) & (freqs <= hi)
-                band_feats.append(psd[:, idx].mean(axis=1) if idx.any() else np.zeros(NUM_CH))
-            band_feats = np.array(band_feats).T  # [16, 5]
+                band_cols.append(psd[:, idx].mean(axis=1) if idx.any() else np.zeros(NUM_CH, dtype=np.float32))
+            band_feats = np.column_stack(band_cols)  # [16, 5]
 
-            std_feat  = seg.std(axis=1, keepdims=True)                  # [16,1]
-            kurt_feat = np.array([_kurtosis(seg[c]) for c in range(NUM_CH)]).reshape(-1,1)  # [16,1]
+            # ── Hjorth parameters (fully vectorised, O(n)) ──
+            std_v = seg.std(axis=1, keepdims=True) + 1e-8          # [16,1]
+            d1    = np.diff(seg, axis=1)
+            d1_std = d1.std(axis=1, keepdims=True) + 1e-8
+            d2_std = np.diff(d1, axis=1).std(axis=1, keepdims=True) + 1e-8
+            mob    = d1_std / std_v                                 # [16,1]
+            comp   = d2_std / d1_std                                # [16,1]
+            kurt   = (((seg - seg.mean(axis=1, keepdims=True)) / std_v) ** 4).mean(axis=1, keepdims=True)  # [16,1]
 
-            # Hjorth parameters (fast, O(n))
-            d1 = np.diff(seg, axis=1)
-            d2 = np.diff(d1, axis=1)
-            mob  = (d1.std(axis=1) / (seg.std(axis=1) + 1e-8)).reshape(-1,1)   # [16,1]
-            comp = (d2.std(axis=1) / (d1.std(axis=1) + 1e-8)).reshape(-1,1)    # [16,1]
-
-            feats = np.concatenate([band_feats, std_feat, kurt_feat, mob, comp], axis=1)  # [16,9]
+            feats = np.concatenate([band_feats, std_v, kurt, mob, comp], axis=1)  # [16,9]
             feats = (feats - feats.mean(0)) / (feats.std(0) + 1e-6)
 
-            # Channel identity one-hot [16,16]
-            identity = np.eye(NUM_CH, dtype=np.float32)
+            nodes = np.concatenate([feats, CHANNEL_EYE], axis=1).astype(np.float32)  # [16,25]
 
-            return np.concatenate([feats, identity], axis=1).astype(np.float32)  # [16,25]
+            # ── Adjacency: raw Pearson correlation replicated for all 5 bands ──
+            corr = np.corrcoef(seg)
+            corr = np.nan_to_num(corr, nan=0.0).astype(np.float32)
+            np.fill_diagonal(corr, 1.0)
+            adj = np.stack([corr] * 5, axis=0)   # [5, 16, 16]
 
-        def _epoch_adj(seg):
-            """Compute per-band correlation adjacency -> [5, 16, 16]"""
-            adj_bands = []
-            from scipy.signal import butter, filtfilt
-            for (lo, hi) in BANDS:
-                nyq = SFREQ / 2
-                lo_n, hi_n = lo / nyq, min(hi / nyq, 0.99)
-                try:
-                    b, a = butter(4, [lo_n, hi_n], btype='band')
-                    filtered = filtfilt(b, a, seg, axis=1)
-                except Exception:
-                    filtered = seg
-                # Pearson correlation as adjacency
-                c = np.corrcoef(filtered)
-                c = np.nan_to_num(c, nan=0.0)
-                np.fill_diagonal(c, 1.0)
-                adj_bands.append(c.astype(np.float32))
-            return np.stack(adj_bands, axis=0)  # [5, 16, 16]
+            return nodes, adj
 
-        # Extract per-epoch features sequentially
+        # ── Extract epochs (stop early) ──────────────────────────────────────
         epoch_nodes, epoch_adjs = [], []
+        max_epochs = SEQ_LEN + MAX_SEQS - 1   # minimum needed to build MAX_SEQS sequences
         for start in range(0, n_pts - win + 1, step):
-            seg = data[:, start:start+win]
-            epoch_nodes.append(_epoch_features(seg))  # [16, 25]
-            epoch_adjs.append(_epoch_adj(seg))         # [5, 16, 16]
-            if len(epoch_nodes) >= SEQ_LEN * MAX_SEQS:
-                break  # Don't over-process
+            n, a = _epoch_fast(data[:, start:start+win])
+            epoch_nodes.append(n)
+            epoch_adjs.append(a)
+            if len(epoch_nodes) >= max_epochs:
+                break
 
         if len(epoch_nodes) < SEQ_LEN:
-            raise HTTPException(status_code=400, detail=f"EDF file too short. Need at least {SEQ_LEN} epochs of {WIN_SEC}s, got {len(epoch_nodes)}.")
+            raise HTTPException(status_code=400,
+                detail=f"EDF too short — need ≥{SEQ_LEN} epochs of {WIN_SEC}s, got {len(epoch_nodes)}.")
 
-        # Group into sequences
-        n_seqs = min(len(epoch_nodes) - SEQ_LEN + 1, MAX_SEQS)
-        nodes_seqs = np.stack([epoch_nodes[i:i+SEQ_LEN] for i in range(n_seqs)])     # [S, 10, 16, 25]
-        adj_seqs   = np.stack([epoch_adjs[i:i+SEQ_LEN]  for i in range(n_seqs)])     # [S, 10, 5, 16, 16]
+        n_seqs     = min(len(epoch_nodes) - SEQ_LEN + 1, MAX_SEQS)
+        nodes_seqs = np.stack([epoch_nodes[i:i+SEQ_LEN] for i in range(n_seqs)])  # [S,10,16,25]
+        adj_seqs   = np.stack([epoch_adjs[i:i+SEQ_LEN]  for i in range(n_seqs)])  # [S,10,5,16,16]
 
-        nodes_t  = torch.tensor(nodes_seqs, dtype=torch.float32).to(DEVICE)
-        adj_t    = torch.tensor(adj_seqs,   dtype=torch.float32).to(DEVICE)
+        nodes_t = torch.tensor(nodes_seqs, dtype=torch.float32).to(DEVICE)
+        adj_t   = torch.tensor(adj_seqs,   dtype=torch.float32).to(DEVICE)
 
         return _run_pipeline(nodes_t, adj_t)
     except HTTPException:
