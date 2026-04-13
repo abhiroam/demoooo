@@ -100,7 +100,9 @@ aside.bg-surface-container-low{border-right:1px solid rgba(255,255,255,0.05);box
 </footer>
 
 <script>
-const API = 'http://localhost:8000';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:8000'
+  : '';  // On Render: same-origin, so relative paths work automatically
 let lastResult = null;
 let systemStatus = null;
 
